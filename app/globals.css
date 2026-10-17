@@ -1,26 +1,144 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #121A21;
+  --foreground: #FFFFFF;
+
+  /* STUDIO (default) */
+  --card: #FFFFFF;
+  --card-foreground: #121A21;
+  --body-text: #3D464C;
+  --muted: #6F766C;
+  --field-label: #7F868F;
+  --input: #FFFFFF;
+  --input-border: #D9DCD2;
+  --focus: #121A21;
+  --button: #121A21;
+  --button-foreground: #FFFFFF;
+  --link: #5F7F16;
+  --divider: #EDEEE7;
+  --badge: #121A21;
+  --icon: #7F868F;
+  color-scheme: light;
+}
+
+:root[data-theme="ink"] {
+  --card: #101E27;
+  --card-foreground: #F3F5F4;
+  --body-text: #C5D0D6;
+  --muted: #93A5AE;
+  --field-label: #7F939C;
+  --input: #101E27;
+  --input-border: #2A3F49;
+  --focus: #F3F5F4;
+  --button: var(--color-spirit-green);
+  --button-foreground: #0D1822;
+  --link: var(--color-spirit-green);
+  --divider: #1A2B35;
+  --badge: #08121A;
+  --icon: #8F9891;
+  color-scheme: dark;
 }
 
 @theme inline {
+  /* Brand palette (was missing) */
+  --color-spirit-green: #CEFC52;
+  --color-roxstar-blue: #77ADDD;
+  --color-roxstar-pink: #E935AE;
+  --color-spirit-ink: #0E1822;
+
+  /* Page-level bridges (was missing) */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+
+  /* Fonts (was missing) */
+  --font-sans: var(--font-outfit);
+  --font-display: var(--font-libre-baskerville);
+
+  /* Theme tokens (yours, unchanged) */
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-body-text: var(--body-text);
+  --color-muted: var(--muted);
+  --color-field-label: var(--field-label);
+  --color-input: var(--input);
+  --color-input-border: var(--input-border);
+  --color-focus: var(--focus);
+  --color-button: var(--button);
+  --color-button-foreground: var(--button-foreground);
+  --color-link: var(--link);
+  --color-divider: var(--divider);
+  --color-badge: var(--badge);
+  --color-icon: var(--icon);
 }
 
-@media (prefers-color-scheme: dark) {
+/* @media (prefers-color-scheme: dark) {
   :root {
     --background: #0a0a0a;
     --foreground: #ededed;
   }
-}
+} */
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+}
+
+@utility bg-stripes {
+  background-image: repeating-linear-gradient(115deg,
+      #161f29 0 14px,
+      #131c25 14px 28px);
+}
+
+/* ── ThemeSwitcher pill ─────────────────────────────────────────────────────
+   A self-contained pill toggle that lives at the top-centre of the auth
+   layout.  Uses design-system tokens so it automatically adapts when the
+   theme changes (e.g. the active bg and text colour both come from tokens).
+────────────────────────────────────────────────────────────────────────── */
+.theme-switcher-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border-radius: 999px;
+  /* A dark surface that sits comfortably on both the stripes bg and any card */
+  background: rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.theme-switcher-option {
+  position: relative;
+  padding: 6px 20px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  /* Muted label colour for inactive options */
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition:
+    background 0.2s ease,
+    color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.15s ease;
+  /* Prevent layout shift when the pill bg appears */
+  white-space: nowrap;
+}
+
+.theme-switcher-option:hover:not(.theme-switcher-option--active) {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Active state: spirit-green bg with near-black text, matching the mockup */
+.theme-switcher-option--active {
+  background: var(--color-spirit-green);
+  color: #0d1822;
+  box-shadow: 0 2px 8px rgba(206, 252, 82, 0.35);
+  transform: scale(1.03);
 }
