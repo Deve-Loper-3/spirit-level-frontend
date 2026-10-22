@@ -8,7 +8,7 @@ import {
     linkButtonClass,
     primaryButtonClass,
 } from "@/components/(auth)/styles";
-import { passwordProblem } from "@/lib/validation/password";
+import { passwordProblem, PASSWORD_HINT } from "@/lib/validation/password";
 
 function CheckIcon() {
     return (
@@ -149,7 +149,7 @@ export default function ResetPasswordForm() {
                         autoComplete="new-password"
                     />
                     <p className="mt-2 text-[12px] text-muted">
-                        At least 8 characters, with a letter and a number.
+                        {PASSWORD_HINT}
                     </p>
                 </div>
 

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Libre_Baskerville, Outfit } from "next/font/google";
 import "./globals.css";
 import { getTheme } from "@/lib/theme";
+import { AuthProvider } from "@/lib/auth/AuthContext";
 
 const outfit = Outfit({
   variable: "--font-outfit",
@@ -28,7 +29,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       data-theme={theme}
       className={`${outfit.variable} ${librebaskerville.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        <AuthProvider>{children}</AuthProvider>
+      </body>
     </html>
   );
 }

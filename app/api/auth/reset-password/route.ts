@@ -2,12 +2,16 @@ import { NextResponse } from "next/server";
 import { BackendError, resetPassword } from "@/lib/api/backend";
 import { clearResetToken, getResetToken } from "@/lib/auth/reset";
 import { passwordProblem } from "@/lib/validation/password";
-
-function isText(value: unknown): value is string {
-    return typeof value === "string" && value.trim().length > 0;
-}
+import { isText } from "@/lib/validation/request";
+import { checkRateLimit, getClientIp, rateLimitResponse } from "@/lib/security/rateLimit";
 
 export async function POST(request: Request) {
+    const clientIp = getClientIp(request);
+    const rateCheck = checkRateLimit(`reset-pwd:${clientIp}`, 10, 15 * 60);
+    if (!rateCheck.allowed) {
+        return rateLimitResponse(rateCheck.retryAfterSeconds);
+    }
+
     let body: Record<string, unknown>;
     try {
         body = await request.json();
@@ -24,8 +28,6 @@ export async function POST(request: Request) {
         );
     }
 
-    // Only newPassword is read. The "confirm" field is a typo guard for the user and
-    // never leaves the browser.
     const { newPassword } = body;
     if (!isText(newPassword)) {
         return NextResponse.json(
@@ -34,13 +36,11 @@ export async function POST(request: Request) {
         );
     }
 
-    // Anyone can call this URL directly and skip the form, so we check again here.
     const problem = passwordProblem(newPassword);
     if (problem) {
         return NextResponse.json({ message: problem }, { status: 400 });
     }
 
-    // The proof that the OTP step succeeded. No cookie means no permission.
     const token = await getResetToken();
     if (!token) {
         return NextResponse.json(
@@ -50,14 +50,15 @@ export async function POST(request: Request) {
     }
 
     try {
-        await resetPassword(token, newPassword); // never trim or log a password
-        await clearResetToken(); // the token is single-use, so remove it now
-        return NextResponse.json({ message: "Password updated." }, { status: 200 });
+        await resetPassword(token, newPassword);
+        await clearResetToken();
+        return NextResponse.json({ message: "Password updated successfully." }, { status: 200 });
     } catch (error) {
         if (error instanceof BackendError) {
-            // ASSUMPTION: the backend answers 401 for an invalid or expired token.
-            // That token is dead, so drop the cookie too.
-            if (error.status === 401) await clearResetToken();
+            // Expired or invalid reset token is unrecoverable, clear the cookie
+            if (error.status === 401) {
+                await clearResetToken();
+            }
             return NextResponse.json(
                 { message: error.message },
                 { status: error.status },

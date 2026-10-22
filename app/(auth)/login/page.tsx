@@ -1,18 +1,26 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import PasswordInput from "@/components/(auth)/PasswordInput";
 import OtpInput from "@/components/(auth)/OtpInput";
 import {
-    inputClass,
+    inputBase,
     labelClass,
     linkButtonClass,
     primaryButtonClass,
-    secondaryButtonClass,
 } from "@/components/(auth)/styles";
-
+import {
+    validateLoginEmail,
+    validateLoginPassword,
+    validateLoginForm,
+    mapBackendFieldErrors,
+    type LoginFieldErrors,
+} from "@/lib/validation/auth";
+import { setClientSession } from "@/lib/auth/authClient";
+import { getRoleHome, isRouteAllowedForRole } from "@/lib/auth/roles";
+import type { BackendTokens, BackendUser, ApiFieldError } from "@/lib/api/types";
 
 type View = "signin" | "reset" | "otp";
 
@@ -37,18 +45,65 @@ function MailIcon() {
     );
 }
 
-export default function LoginPage() {
+function Spinner() {
+    return (
+        <svg
+            className="mr-2 size-4 animate-spin text-current"
+            xmlns="http://www.w3.org/2000/svg"
+            fill="none"
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+        >
+            <circle
+                className="opacity-25"
+                cx="12"
+                cy="12"
+                r="10"
+                stroke="currentColor"
+                strokeWidth="4"
+            />
+            <path
+                className="opacity-75"
+                fill="currentColor"
+                d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+            />
+        </svg>
+    );
+}
+
+interface ApiErrorState {
+    message: string;
+    code?: string;
+    isRegistrationIncomplete?: boolean;
+    isAccountDisabled?: boolean;
+}
+
+function LoginContent() {
     const router = useRouter();
+    const searchParams = useSearchParams();
     const [view, setView] = useState<View>("signin");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
-    // showPassword state is gone: PasswordInput owns it now.
     const [remember, setRemember] = useState(false);
+    const [fieldErrors, setFieldErrors] = useState<LoginFieldErrors>({});
+    const [apiError, setApiError] = useState<ApiErrorState | null>(null);
     const [otp, setOtp] = useState("");
     const [isLoading, setIsLoading] = useState(false);
-    const [error, setError] = useState("");
     const [resendCooldown, setResendCooldown] = useState(0);
+    const [isOtpLockedOut, setIsOtpLockedOut] = useState(false);
     const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+    const emailInputRef = useRef<HTMLInputElement>(null);
+    const passwordInputRef = useRef<HTMLInputElement>(null);
+
+    const registeredParam = searchParams.get("registered");
+    const isPendingApproval = registeredParam === "pending";
+    const isRegistered = registeredParam === "true";
+
+    // Query messages from Ticket 1 and Ticket 2
+    const queryMessage = searchParams.get("message");
+    const queryError = searchParams.get("error");
+    const returnUrl = searchParams.get("returnUrl");
 
     useEffect(() => {
         return () => {
@@ -57,57 +112,169 @@ export default function LoginPage() {
     }, []);
 
     function goTo(next: View) {
-        setError("");
+        setApiError(null);
+        setFieldErrors({});
+        if (next !== "otp") {
+            setIsOtpLockedOut(false);
+        }
         setView(next);
+    }
+
+    // Inline field validation handlers
+    function handleEmailBlur() {
+        const error = validateLoginEmail(email);
+        setFieldErrors((prev) => ({ ...prev, email: error }));
+    }
+
+    function handlePasswordBlur() {
+        const error = validateLoginPassword(password);
+        setFieldErrors((prev) => ({ ...prev, password: error }));
+    }
+
+    function handleEmailChange(e: React.ChangeEvent<HTMLInputElement>) {
+        setEmail(e.target.value);
+        if (fieldErrors.email) {
+            setFieldErrors((prev) => ({ ...prev, email: undefined }));
+        }
+    }
+
+    function handlePasswordChange(e: React.ChangeEvent<HTMLInputElement>) {
+        setPassword(e.target.value);
+        if (fieldErrors.password) {
+            setFieldErrors((prev) => ({ ...prev, password: undefined }));
+        }
     }
 
     async function handleSignIn(e: React.FormEvent<HTMLFormElement>) {
         e.preventDefault();
-        setError("");
+        setApiError(null);
+
+        // 1. Client-side validation on submit
+        const validation = validateLoginForm(email, password);
+        if (!validation.isValid) {
+            setFieldErrors(validation.errors);
+            if (validation.errors.email) {
+                emailInputRef.current?.focus();
+            } else if (validation.errors.password) {
+                passwordInputRef.current?.focus();
+            }
+            return;
+        }
+
         setIsLoading(true);
+
         try {
             const res = await fetch("/api/auth/login", {
                 method: "POST",
-                headers: { "content-type": "application/json" },
+                headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
-                    email,
+                    email: validation.sanitized.email,
+                    password: validation.sanitized.password,
                     remember,
-                    password
-                })
-            })
-            const data = await res.json() as { message: string }
+                }),
+            });
+
+            const data = (await res.json()) as {
+                message?: string;
+                code?: string;
+                errors?: ApiFieldError[];
+                user?: BackendUser;
+                tokens?: BackendTokens;
+            };
+
             if (!res.ok) {
-                setError(data.message ?? "Something went wrong. Please try again.");
-                setIsLoading(false);
+                // Map API field errors if present
+                if (Array.isArray(data.errors) && data.errors.length > 0) {
+                    setFieldErrors(mapBackendFieldErrors(data.errors));
+                }
+
+                // Ticket 3 API error handling
+                if (res.status === 401 || data.code === "INVALID_CREDENTIALS") {
+                    // Show API message without highlighting a specific field
+                    setApiError({
+                        message: data.message || "Invalid email or password",
+                        code: data.code || "INVALID_CREDENTIALS",
+                    });
+                } else if (res.status === 403 && data.code === "REGISTRATION_INCOMPLETE") {
+                    setApiError({
+                        message: data.message || "Registration incomplete.",
+                        code: data.code,
+                        isRegistrationIncomplete: true,
+                    });
+                } else if (res.status === 403 && data.code === "ACCOUNT_DISABLED") {
+                    setApiError({
+                        message: data.message || "Your account has been disabled. Please contact support.",
+                        code: data.code,
+                        isAccountDisabled: true,
+                    });
+                } else if (res.status === 403 && data.code === "FORBIDDEN_ROLE") {
+                    setApiError({
+                        message: "This portal is for staff",
+                        code: data.code,
+                    });
+                } else if (res.status === 429) {
+                    setApiError({
+                        message: "Too many attempts. Please try again later.",
+                        code: "RATE_LIMITED",
+                    });
+                } else {
+                    setApiError({
+                        message: data.message || "Something went wrong. Please try again.",
+                        code: data.code,
+                    });
+                }
                 return;
             }
-            router.replace("/console")
 
+            // Success: configure client session
+            if (data.tokens && data.user) {
+                try {
+                    setClientSession(data.tokens, data.user);
+                } catch {
+                    setApiError({ message: "This portal is for staff" });
+                    return;
+                }
 
+                // Ticket 2: Role redirect / returnUrl check
+                const userRole = data.user.role;
+                if (
+                    returnUrl &&
+                    returnUrl.startsWith("/") &&
+                    !returnUrl.startsWith("//") &&
+                    isRouteAllowedForRole(returnUrl, userRole)
+                ) {
+                    router.replace(returnUrl);
+                } else {
+                    router.replace(getRoleHome(userRole));
+                }
+            } else {
+                router.replace("/console");
+            }
         } catch {
-            setError("Something went wrong. Please try again.");
+            setApiError({ message: "Network error: backend service unavailable." });
+        } finally {
             setIsLoading(false);
         }
     }
 
-    // Asks our server to send the code. Returns true if the request was accepted.
     async function requestOtp(): Promise<boolean> {
-        setError("");
+        setApiError(null);
         setIsLoading(true);
         try {
             const res = await fetch("/api/auth/forgot-password", {
                 method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ email }),
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: email.trim().toLowerCase() }),
             });
             const data = (await res.json()) as { message?: string };
             if (!res.ok) {
-                setError(data.message ?? "We couldn't send the code. Please try again.");
+                setApiError({ message: data.message ?? "We couldn't send the code. Please try again." });
                 return false;
             }
+            setIsOtpLockedOut(false);
             return true;
         } catch {
-            setError("We couldn't send the code. Please try again.");
+            setApiError({ message: "We couldn't send the code. Please try again." });
             return false;
         } finally {
             setIsLoading(false);
@@ -116,6 +283,12 @@ export default function LoginPage() {
 
     async function handleReset(e: React.FormEvent<HTMLFormElement>) {
         e.preventDefault();
+        const emailErr = validateLoginEmail(email);
+        if (emailErr) {
+            setFieldErrors({ email: emailErr });
+            emailInputRef.current?.focus();
+            return;
+        }
         if (await requestOtp()) {
             setOtp("");
             goTo("otp");
@@ -125,24 +298,28 @@ export default function LoginPage() {
 
     async function handleVerify(e: React.FormEvent<HTMLFormElement>) {
         e.preventDefault();
-        setError("");
+        if (isOtpLockedOut) return;
+        setApiError(null);
         setIsLoading(true);
         try {
             const res = await fetch("/api/auth/verify-otp", {
                 method: "POST",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ email, otp }),
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ email: email.trim().toLowerCase(), otp: otp.trim() }),
             });
-            const data = (await res.json()) as { message?: string };
+            const data = (await res.json()) as { message?: string; remainingAttempts?: number };
             if (!res.ok) {
-                setError(data.message ?? "That code didn't work. Please try again.");
-                setIsLoading(false);
+                setApiError({ message: data.message ?? "That code didn't work. Please try again." });
+                if (res.status === 429 || data.remainingAttempts === 0) {
+                    setIsOtpLockedOut(true);
+                    setOtp("");
+                }
                 return;
             }
-            // TEMPORARY: the real "set a new password" screen will replace this redirect.
             router.replace("/reset-password");
         } catch {
-            setError("We couldn't verify the code. Please try again.");
+            setApiError({ message: "We couldn't verify the code. Please try again." });
+        } finally {
             setIsLoading(false);
         }
     }
@@ -184,10 +361,8 @@ export default function LoginPage() {
         },
     }[view];
 
-    // The shell (<main>, logo, card, footer) now lives in (auth)/layout.tsx,
-    // so this page returns only what goes inside the card. A fragment groups the siblings.
     return (
-        <>
+        <div className="w-full min-w-[280px]">
             {view === "otp" ? (
                 <div
                     aria-hidden="true"
@@ -214,49 +389,142 @@ export default function LoginPage() {
                 {copy.text}
             </p>
 
-            {error && (
+            {/* Session Ended notification from Ticket 1 */}
+            {queryMessage && !apiError && view === "signin" && (
                 <div
                     role="alert"
-                    className="mb-5 rounded-[6px] border border-[#F2C4C0] bg-[#FDF2F1] px-3 py-2 text-[13px] text-[#B42318]"
+                    className="mb-5 rounded-[6px] border border-[#F2C4C0] bg-[#FDF2F1] px-3.5 py-2.5 text-[13px] text-[#B42318]"
                 >
-                    {error}
+                    {queryMessage}
+                </div>
+            )}
+
+            {/* Member Refusal notification from Ticket 2 */}
+            {queryError === "member_refused" && !apiError && view === "signin" && (
+                <div
+                    role="alert"
+                    className="mb-5 rounded-[6px] border border-[#F2C4C0] bg-[#FDF2F1] px-3.5 py-2.5 text-[13px] text-[#B42318]"
+                >
+                    This portal is for staff
+                </div>
+            )}
+
+            {isPendingApproval && view === "signin" && !apiError && !queryMessage && (
+                <div
+                    role="status"
+                    className="mb-5 rounded-[6px] border border-[#BDEBA0] bg-[#F4FBEA] px-3 py-2.5 text-[13px] text-[#2F6114]"
+                >
+                    <span className="font-semibold block mb-0.5">Registration submitted</span>
+                    Your coach account has been registered and is pending administrator activation. You will be able to sign in once an administrator approves your account.
+                </div>
+            )}
+
+            {isRegistered && !isPendingApproval && view === "signin" && !apiError && !queryMessage && (
+                <div
+                    role="status"
+                    className="mb-5 rounded-[6px] border border-[#BDEBA0] bg-[#F4FBEA] px-3 py-2 text-[13px] text-[#2F6114]"
+                >
+                    Account created successfully. Please sign in below.
+                </div>
+            )}
+
+            {/* API Errors Banner */}
+            {apiError && (
+                <div
+                    role="alert"
+                    className="mb-5 rounded-[6px] border border-[#F2C4C0] bg-[#FDF2F1] px-3.5 py-2.5 text-[13px] text-[#B42318]"
+                >
+                    <span>{apiError.message}</span>
+                    {apiError.isRegistrationIncomplete && (
+                        <div className="mt-1">
+                            <Link
+                                href="/signup"
+                                className="font-semibold underline underline-offset-2 hover:opacity-90 inline-block min-h-[44px] leading-[44px]"
+                            >
+                                Finish sign-up &rarr;
+                            </Link>
+                        </div>
+                    )}
                 </div>
             )}
 
             {/* VIEW 1: SIGN IN */}
             {view === "signin" && (
                 <>
-                    <form onSubmit={handleSignIn}>
+                    <form onSubmit={handleSignIn} noValidate>
                         <div className="mb-[18px]">
                             <label htmlFor="email" className={labelClass}>
                                 Staff email
                             </label>
                             <input
+                                ref={emailInputRef}
                                 type="email"
                                 id="email"
                                 name="email"
                                 value={email}
-                                onChange={(e) => setEmail(e.target.value)}
+                                onChange={handleEmailChange}
+                                onBlur={handleEmailBlur}
                                 autoComplete="email"
+                                maxLength={254}
                                 required
-                                className={inputClass}
+                                aria-required="true"
+                                aria-invalid={Boolean(fieldErrors.email)}
+                                aria-describedby={fieldErrors.email ? "email-error" : undefined}
+                                className={`${inputBase} px-[15px] ${
+                                    fieldErrors.email
+                                        ? "border-[#B42318] focus:border-[#B42318] focus:ring-[#B42318]"
+                                        : ""
+                                }`}
                             />
+                            {fieldErrors.email && (
+                                <p
+                                    id="email-error"
+                                    role="alert"
+                                    className="mt-1.5 text-[12px] text-[#B42318]"
+                                >
+                                    {fieldErrors.email}
+                                </p>
+                            )}
                         </div>
 
                         <div className="mb-[18px]">
-                            <label htmlFor="password" className={labelClass}>
-                                Password
-                            </label>
+                            <div className="flex items-center justify-between mb-2">
+                                <label htmlFor="password" className={labelClass.replace("mb-2 ", "")}>
+                                    Password
+                                </label>
+                                <button
+                                    type="button"
+                                    onClick={() => goTo("reset")}
+                                    className="text-[12px] font-semibold text-link underline underline-offset-2 hover:opacity-80 focus-visible:outline-2 focus-visible:outline-focus cursor-pointer"
+                                >
+                                    Forgot password?
+                                </button>
+                            </div>
                             <PasswordInput
                                 id="password"
                                 name="password"
                                 value={password}
-                                onChange={(e) => setPassword(e.target.value)}
+                                onChange={handlePasswordChange}
+                                onBlur={handlePasswordBlur}
                                 autoComplete="current-password"
+                                maxLength={72}
+                                ariaInvalid={Boolean(fieldErrors.password)}
+                                ariaDescribedBy={fieldErrors.password ? "password-error" : undefined}
+                                hasError={Boolean(fieldErrors.password)}
+                                disabled={isLoading}
                             />
+                            {fieldErrors.password && (
+                                <p
+                                    id="password-error"
+                                    role="alert"
+                                    className="mt-1.5 text-[12px] text-[#B42318]"
+                                >
+                                    {fieldErrors.password}
+                                </p>
+                            )}
                         </div>
 
-                        <label className="mb-6 flex cursor-pointer items-center gap-3 text-[14px] text-body-text">
+                        <label className="mb-6 flex min-h-[44px] cursor-pointer items-center gap-3 text-[14px] text-body-text">
                             <span className="relative flex size-[19px] shrink-0">
                                 <input
                                     type="checkbox"
@@ -283,30 +551,27 @@ export default function LoginPage() {
                         <button
                             type="submit"
                             disabled={isLoading}
-                            className={primaryButtonClass}
+                            className={`${primaryButtonClass} flex items-center justify-center`}
                         >
-                            {isLoading ? "Signing in…" : "Sign in"}
+                            {isLoading ? (
+                                <>
+                                    <Spinner />
+                                    <span>Signing in…</span>
+                                </>
+                            ) : (
+                                "Sign in"
+                            )}
                         </button>
                     </form>
 
-                    {/* Sign-up link: a Link styled as a button. It's inline by default, so
-           flex + items-center + justify-center make the h-w -classes take effect. */}
-                    <Link
-                        href="/signup"
-                        className={`${secondaryButtonClass} mt-3 flex items-center justify-center`}
-                    >
-                        Create an account
-                    </Link>
-
-                    <div className="mt-[22px] border-t border-divider pt-[18px] text-center text-[13px] text-muted">
-                        Forgot your password?{" "}
-                        <button
-                            type="button"
-                            onClick={() => goTo("reset")}
-                            className={linkButtonClass}
+                    <div className="mt-5 text-center text-[13px] text-muted">
+                        Don&apos;t have an account?{" "}
+                        <Link
+                            href="/signup"
+                            className={`${linkButtonClass} inline-flex min-h-[44px] items-center`}
                         >
-                            Reset it
-                        </button>
+                            Sign up
+                        </Link>
                     </div>
                 </>
             )}
@@ -314,28 +579,54 @@ export default function LoginPage() {
             {/* VIEW 2: RESET FORM */}
             {view === "reset" && (
                 <>
-                    <form onSubmit={handleReset}>
+                    <form onSubmit={handleReset} noValidate>
                         <div className="mb-6">
                             <label htmlFor="reset-email" className={labelClass}>
                                 Staff email
                             </label>
                             <input
+                                ref={emailInputRef}
                                 type="email"
                                 id="reset-email"
                                 name="email"
                                 value={email}
-                                onChange={(e) => setEmail(e.target.value)}
+                                onChange={handleEmailChange}
+                                onBlur={handleEmailBlur}
                                 autoComplete="email"
+                                maxLength={254}
                                 required
-                                className={inputClass}
+                                aria-required="true"
+                                aria-invalid={Boolean(fieldErrors.email)}
+                                aria-describedby={fieldErrors.email ? "reset-email-error" : undefined}
+                                className={`${inputBase} px-[15px] ${
+                                    fieldErrors.email
+                                        ? "border-[#B42318] focus:border-[#B42318] focus:ring-[#B42318]"
+                                        : ""
+                                }`}
                             />
+                            {fieldErrors.email && (
+                                <p
+                                    id="reset-email-error"
+                                    role="alert"
+                                    className="mt-1.5 text-[12px] text-[#B42318]"
+                                >
+                                    {fieldErrors.email}
+                                </p>
+                            )}
                         </div>
                         <button
                             type="submit"
                             disabled={isLoading}
-                            className={primaryButtonClass}
+                            className={`${primaryButtonClass} flex items-center justify-center`}
                         >
-                            {isLoading ? "Sending…" : "Send OTP"}
+                            {isLoading ? (
+                                <>
+                                    <Spinner />
+                                    <span>Sending…</span>
+                                </>
+                            ) : (
+                                "Send OTP"
+                            )}
                         </button>
                     </form>
 
@@ -343,7 +634,7 @@ export default function LoginPage() {
                         <button
                             type="button"
                             onClick={() => goTo("signin")}
-                            className={linkButtonClass}
+                            className={`${linkButtonClass} inline-flex min-h-[44px] items-center cursor-pointer`}
                         >
                             Back to sign in
                         </button>
@@ -351,7 +642,7 @@ export default function LoginPage() {
                 </>
             )}
 
-            {/* VIEW 3: CONFIRMATION */}
+            {/* VIEW 3: OTP CONFIRMATION */}
             {view === "otp" && (
                 <>
                     <form onSubmit={handleVerify}>
@@ -363,39 +654,65 @@ export default function LoginPage() {
                                 length={OTP_LENGTH}
                                 value={otp}
                                 onChange={setOtp}
-                                disabled={isLoading}
+                                disabled={isLoading || isOtpLockedOut}
                             />
+                            {isOtpLockedOut && (
+                                <p className="mt-2 text-[12px] text-[#B42318]">
+                                    Verification locked. Please click &ldquo;Resend&rdquo; below to request a new code.
+                                </p>
+                            )}
                         </div>
                         <button
                             type="submit"
-                            disabled={isLoading || otp.length !== OTP_LENGTH}
-                            className={`${primaryButtonClass} ${otp.length !== OTP_LENGTH ? "opacity-50 cursor-not-allowed" : ""}`}
+                            disabled={isLoading || isOtpLockedOut || otp.length !== OTP_LENGTH}
+                            className={`${primaryButtonClass} flex items-center justify-center ${
+                                otp.length !== OTP_LENGTH || isOtpLockedOut
+                                    ? "opacity-50 cursor-not-allowed"
+                                    : ""
+                            }`}
                         >
-                            {isLoading ? "Verifying…" : "Verify code"}
+                            {isLoading ? (
+                                <>
+                                    <Spinner />
+                                    <span>Verifying…</span>
+                                </>
+                            ) : isOtpLockedOut ? (
+                                "Verification locked"
+                            ) : (
+                                "Verify code"
+                            )}
                         </button>
                     </form>
 
-                    <div className="mt-[22px] border-t border-divider pt-[18px] text-center text-[13px] text-muted">
-                        Didn&apos;t get it?{" "}
+                    <div className="mt-[22px] border-t border-divider pt-[18px] text-center text-[13px] text-muted flex items-center justify-center gap-2">
+                        <span>Didn&apos;t get it?</span>
                         <button
                             type="button"
                             onClick={handleResend}
                             disabled={isLoading || resendCooldown > 0}
-                            className={`${linkButtonClass} disabled:opacity-50 disabled:cursor-not-allowed`}
+                            className={`${linkButtonClass} inline-flex min-h-[44px] items-center disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer`}
                         >
                             {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend"}
                         </button>
-                        {" · "}
+                        <span>·</span>
                         <button
                             type="button"
                             onClick={() => goTo("signin")}
-                            className={linkButtonClass}
+                            className={`${linkButtonClass} inline-flex min-h-[44px] items-center cursor-pointer`}
                         >
                             Back to sign in
                         </button>
                     </div>
                 </>
             )}
-        </>
+        </div>
+    );
+}
+
+export default function LoginPage() {
+    return (
+        <Suspense fallback={null}>
+            <LoginContent />
+        </Suspense>
     );
 }

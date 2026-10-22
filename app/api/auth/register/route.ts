@@ -5,15 +5,19 @@ import {
     type BackendRegisterRequest,
     type Gender,
 } from "@/lib/api/types";
-
-// A type guard: true only for non-empty strings, and it tells TypeScript so.
-function isText(value: unknown): value is string {
-    return typeof value === "string" && value.trim().length > 0;
-}
+import { isText } from "@/lib/validation/request";
+import { passwordProblem } from "@/lib/validation/password";
+import { checkRateLimit, getClientIp, rateLimitResponse } from "@/lib/security/rateLimit";
 
 export async function POST(request: Request) {
-    // 1. Parse the browser's JSON. Never trust it: the body can be malformed, or anyone
-    //    can call this URL directly and skip your form's validation entirely.
+    // 0. Rate limiting: 50 registration attempts per hour per IP
+    const clientIp = getClientIp(request);
+    const rateCheck = checkRateLimit(`register:${clientIp}`, 50, 60 * 60);
+    if (!rateCheck.allowed) {
+        return rateLimitResponse(rateCheck.retryAfterSeconds);
+    }
+
+    // 1. Parse and validate JSON body
     let body: Record<string, unknown>;
     try {
         body = await request.json();
@@ -30,8 +34,7 @@ export async function POST(request: Request) {
         );
     }
 
-    // 2. Read ONLY the fields we expect. Anything else the caller sends, including
-    //    "role", is ignored here, so it can never reach the backend.
+    // 2. Destructure and validate required fields
     const { firstName, lastName, email, phone, gender, password, dob, whatsappNumber } = body;
 
     if (
@@ -48,9 +51,10 @@ export async function POST(request: Request) {
         );
     }
 
-    if (password.length < 8) {
+    const problem = passwordProblem(password);
+    if (problem) {
         return NextResponse.json(
-            { message: "Password must be at least 8 characters." },
+            { message: problem },
             { status: 400 },
         );
     }
@@ -59,9 +63,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ message: "Invalid gender." }, { status: 400 });
     }
 
-    // 3. Date of birth: "YYYY-MM-DD" -> day and month numbers (the backend stores no year).
-    //    We split the string instead of using new Date(), which can shift the date
-    //    by a day depending on the timezone.
+    // 3. Date of birth formatting: "YYYY-MM-DD" -> day and month
     let birthDay: number | undefined;
     let birthMonth: number | undefined;
     if (isText(dob)) {
@@ -83,24 +85,26 @@ export async function POST(request: Request) {
         birthMonth = month;
     }
 
-    // 4. Translate the FORM's shape into the BACKEND's shape.
+    // 4. Construct payload for backend, assigning role as "coach"
     const payload: BackendRegisterRequest = {
         fullName: `${firstName.trim()} ${lastName.trim()}`,
         email: email.trim(),
         phone: phone.trim(),
-        gender: gender as Gender, // safe: checked against GENDERS above
-        password, // never trim a password: spaces may be intentional. Never log it either.
+        gender: gender as Gender,
+        password,
+        role: "coach",
         ...(isText(whatsappNumber) ? { whatsappNumber: whatsappNumber.trim() } : {}),
-        // ASSUMPTION: if the real backend rejects these two fields, delete this line.
         ...(birthDay && birthMonth ? { birthDay, birthMonth } : {}),
     };
 
-    // 5. Call the backend and translate the outcome for the browser.
+    // 5. Call backend
     try {
         const user = await registerUser(payload);
-        // Send back only what the browser needs, not the whole user object.
         return NextResponse.json(
-            { message: "Registration successful.", status: user.status },
+            {
+                message: "Registration submitted successfully. Your account is pending administrator activation.",
+                status: user.status,
+            },
             { status: 201 },
         );
     } catch (error) {
@@ -110,7 +114,6 @@ export async function POST(request: Request) {
                 { status: error.status },
             );
         }
-        // A bug on our side (such as a missing env var): log it for you, keep the user's message generic.
         console.error("Register route failed:", error);
         return NextResponse.json(
             { message: "Something went wrong. Please try again." },

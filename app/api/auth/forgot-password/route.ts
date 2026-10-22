@@ -1,15 +1,18 @@
 import { NextResponse } from "next/server";
 import { BackendError, requestPasswordReset } from "@/lib/api/backend";
+import { isText } from "@/lib/validation/request";
+import { checkRateLimit, getClientIp, rateLimitResponse, resetOtpFailures } from "@/lib/security/rateLimit";
 
-function isText(value: unknown): value is string {
-    return typeof value === "string" && value.trim().length > 0;
-}
-
-// One fixed message for every "request accepted" outcome. The browser never learns
-// whether the account exists.
 const NEUTRAL_MESSAGE = "If the email is registered, an OTP has been sent to it.";
 
 export async function POST(request: Request) {
+    // 0. IP rate limiting: 5 OTP requests per 15 minutes
+    const clientIp = getClientIp(request);
+    const ipCheck = checkRateLimit(`forgot-ip:${clientIp}`, 5, 15 * 60);
+    if (!ipCheck.allowed) {
+        return rateLimitResponse(ipCheck.retryAfterSeconds);
+    }
+
     let body: Record<string, unknown>;
     try {
         body = await request.json();
@@ -34,17 +37,24 @@ export async function POST(request: Request) {
         );
     }
 
+    const cleanEmail = email.trim().toLowerCase();
+
+    // Secondary email-targeted rate limiting: 3 per 15 minutes
+    const emailCheck = checkRateLimit(`forgot-email:${cleanEmail}`, 3, 15 * 60);
+    if (!emailCheck.allowed) {
+        return rateLimitResponse(emailCheck.retryAfterSeconds);
+    }
+
     try {
-        await requestPasswordReset(email.trim());
+        await requestPasswordReset(cleanEmail);
+        resetOtpFailures(cleanEmail);
         return NextResponse.json({ message: NEUTRAL_MESSAGE }, { status: 200 });
     } catch (error) {
         if (error instanceof BackendError) {
-            // ASSUMPTION: if the real backend ever answers 404 for an unknown email, we hide
-            // it, so this endpoint can never be used to discover registered emails.
+            // Conceal 404 to avoid email enumeration
             if (error.status === 404) {
                 return NextResponse.json({ message: NEUTRAL_MESSAGE }, { status: 200 });
             }
-            // Validation (400), too many requests (429) and so on: pass the message through.
             return NextResponse.json(
                 { message: error.message },
                 { status: error.status },

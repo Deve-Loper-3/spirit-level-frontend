@@ -1,18 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import PasswordInput from "@/components/(auth)/PasswordInput";
 import {
     inputClass,
     labelClass,
     primaryButtonClass,
 } from "@/components/(auth)/styles";
+import { passwordProblem, PASSWORD_HINT } from "@/lib/validation/password";
 
-
-
-// Today's date as "YYYY-MM-DD" in the user's LOCAL time.
-// Don't use new Date().toISOString().slice(0, 10): that is the UTC date,
-// which can be a day off near midnight.
 function todayISO() {
     const d = new Date();
     const month = String(d.getMonth() + 1).padStart(2, "0");
@@ -21,7 +18,7 @@ function todayISO() {
 }
 
 export default function SignUpForm() {
-    // One state object for all fields, instead of five separate useState calls.
+    const router = useRouter();
     const [values, setValues] = useState({
         firstName: "",
         lastName: "",
@@ -29,58 +26,41 @@ export default function SignUpForm() {
         dob: "",
         phoneNum: "",
         gender: "",
-        // whatsappNum stores a custom number only when whatsappSameAsPhone is false.
-        // When true, the phone number is reused at submit time — no duplication needed.
         whatsappNum: "",
         password: "",
     });
-    // Tracks whether WhatsApp == phone. Separate from `values` because it isn't
-    // a form field that gets submitted — it's purely a UI toggle.
     const [whatsappSameAsPhone, setWhatsappSameAsPhone] = useState(true);
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState("");
     const dobRef = useRef<HTMLInputElement>(null);
 
-    // One handler for every field. It reads the input's `name` attribute and updates the
-    // matching key, which is why each input's `name` must match a key in `values`.
-    // [name] is a computed property key. The spread copies the other fields unchanged.
     function handleChange(e: React.ChangeEvent<HTMLInputElement>) {
         const { name, value } = e.target;
         setValues((prev) => ({ ...prev, [name]: value }));
     }
 
-    // Same pattern as handleChange but for <select> elements.
     function handleSelectChange(e: React.ChangeEvent<HTMLSelectElement>) {
         const { name, value } = e.target;
         setValues((prev) => ({ ...prev, [name]: value }));
     }
 
-    // Handles the "Same as phone" / "Other" radio toggle for WhatsApp.
-    // Switching to "same" clears any previously typed custom number so the
-    // field resets cleanly if the user switches back.
     function handleWhatsappToggle(same: boolean) {
         setWhatsappSameAsPhone(same);
         if (same) setValues((prev) => ({ ...prev, whatsappNum: "" }));
     }
 
-    // Opens the calendar when the user clicks anywhere in the field, not just on the icon.
-    // showPicker() needs a user gesture (a click is one) and can throw in some browsers,
-    // so it's wrapped in try/catch. If the calendar flickers shut when you click the
-    // built-in icon, remove the onClick on the date input.
     function openPicker() {
         try {
             dobRef.current?.showPicker();
         } catch {
-            // Ignore: the user can still use the browser's own icon or type the date.
+            // Ignore: fallback to native behavior
         }
     }
 
-    // Returns an error message, or "" if everything is valid.
-    // Dates in "YYYY-MM-DD" form compare correctly as plain strings.
-    function validate() {
+    function validate(): string {
         if (values.dob > todayISO()) return "Date of birth can't be in the future.";
-        if (values.password.length < 8)
-            return "Password must be at least 8 characters.";
+        const problem = passwordProblem(values.password);
+        if (problem) return problem;
         return "";
     }
 
@@ -111,14 +91,14 @@ export default function SignUpForm() {
                 }),
             });
 
-            const data = await res.json() as { message: string };
+            const data = (await res.json()) as { message?: string };
             if (!res.ok) {
                 setError(data.message ?? "Something went wrong. Please try again.");
                 return;
             }
 
-            // Redirect to login after successful account creation
-            window.location.href = "/login?registered=true";
+            // Redirect to login with pending approval state
+            router.push("/login?registered=pending");
         } catch {
             setError("Something went wrong. Please try again.");
         } finally {
@@ -137,8 +117,6 @@ export default function SignUpForm() {
                 </div>
             )}
 
-            {/* Names: stacked on mobile, two columns from 640px up. The grid's gap handles
-          spacing, so the cells need no margins of their own. */}
             <div className="mb-[18px] grid gap-[18px] sm:grid-cols-2">
                 <div>
                     <label htmlFor="firstName" className={labelClass}>
@@ -192,8 +170,6 @@ export default function SignUpForm() {
                 <label htmlFor="dob" className={labelClass}>
                     Date of birth
                 </label>
-                {/* type="date" gives the mini calendar for free. The value is always
-            "YYYY-MM-DD", whatever format the browser displays. */}
                 <input
                     type="date"
                     id="dob"
@@ -208,14 +184,11 @@ export default function SignUpForm() {
                     className={`${inputClass} cursor-pointer`}
                 />
             </div>
+
             <div className="mb-[18px]">
                 <label htmlFor="phoneNum" className={labelClass}>
                     Phone No.
                 </label>
-                {/* type="tel" is correct for phone numbers: it shows a numeric
-                keyboard on mobile, allows + for country codes, and preserves
-                leading zeros. type="number" strips leading zeros and adds
-                unwanted spin buttons. */}
                 <input
                     type="tel"
                     id="phoneNum"
@@ -228,6 +201,7 @@ export default function SignUpForm() {
                     className={inputClass}
                 />
             </div>
+
             <div className="mb-[18px]">
                 <label htmlFor="gender" className={labelClass}>
                     Gender
@@ -248,9 +222,9 @@ export default function SignUpForm() {
                     <option value="PREFER_NOT_TO_SAY">Prefer not to say</option>
                 </select>
             </div>
+
             <div className="mb-[18px]">
                 <p className={labelClass}>WhatsApp No.</p>
-                {/* Radio toggle -------------------------------------------------- */}
                 <div className="mb-2 flex gap-5">
                     <label className="flex cursor-pointer items-center gap-1.5 text-sm">
                         <input
@@ -275,7 +249,6 @@ export default function SignUpForm() {
                         Other
                     </label>
                 </div>
-                {/* Number input — shown always, read-only when mirroring phone */}
                 <input
                     type="tel"
                     id="whatsappNum"
@@ -288,12 +261,11 @@ export default function SignUpForm() {
                     className={`${inputClass} ${whatsappSameAsPhone ? "cursor-not-allowed opacity-60" : ""}`}
                 />
             </div>
+
             <div className="mb-6">
                 <label htmlFor="password" className={labelClass}>
                     Password
                 </label>
-                {/* new-password tells password managers to offer a NEW strong password,
-            where login uses current-password to offer a saved one. */}
                 <PasswordInput
                     id="password"
                     name="password"
@@ -302,7 +274,7 @@ export default function SignUpForm() {
                     autoComplete="new-password"
                 />
                 <p className="mt-2 text-[12px] text-muted">
-                    At least 8 characters.
+                    {PASSWORD_HINT}
                 </p>
             </div>
 
