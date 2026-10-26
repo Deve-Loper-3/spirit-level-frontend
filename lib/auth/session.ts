@@ -1,5 +1,5 @@
 import "server-only";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import type { BackendTokens, BackendUser } from "@/lib/api/types";
 import { BackendError, getMe, refreshAccessToken } from "@/lib/api/backend";
 
@@ -140,6 +140,13 @@ export async function setSession(
  * Returns the raw access token cookie value, if present.
  */
 export async function getSession(): Promise<string | null> {
+    try {
+        const headerStore = await headers();
+        const forwarded = headerStore.get("x-refreshed-access-token");
+        if (forwarded) return forwarded;
+    } catch {
+        // headers() might not be available in some contexts
+    }
     const store = await cookies();
     return store.get(ACCESS_COOKIE)?.value ?? null;
 }
