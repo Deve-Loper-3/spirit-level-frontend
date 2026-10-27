@@ -2,18 +2,6 @@ import Image from "next/image";
 import ThemeSwitcher from "@/components/ThemeSwitcher";
 import { getTheme } from "@/lib/theme";
 
-/**
- * AuthLayout – Server Component
- *
- * A layout stays mounted while you navigate between /login and /signup, so
- * the stripes, logo, theme switcher, and footer never re-render or flash.
- *
- * Changes from the original:
- *  - Made async so it can await getTheme() for the server-side cookie read.
- *  - Added <ThemeSwitcher> at the top-centre of the page.  The current theme
- *    is passed as a prop so the correct button is highlighted on first render
- *    without any client-side flash.
- */
 export default async function AuthLayout({
     children,
 }: {

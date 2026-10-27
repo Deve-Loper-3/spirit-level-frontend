@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import PasswordInput from "@/components/(auth)/PasswordInput";
 import {
     labelClass,
@@ -9,6 +10,8 @@ import {
     primaryButtonClass,
 } from "@/components/(auth)/styles";
 import { passwordProblem, PASSWORD_HINT } from "@/lib/validation/password";
+import { api, ApiError } from "@/lib/api/client";
+import { clearReset, readReset } from "@/lib/auth/session";
 
 function CheckIcon() {
     return (
@@ -29,11 +32,16 @@ function CheckIcon() {
 }
 
 export default function ResetPasswordForm() {
+    const router = useRouter();
     const [newPassword, setNewPassword] = useState("");
     const [confirmPassword, setConfirmPassword] = useState("");
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState("");
     const [done, setDone] = useState(false);
+
+    useEffect(() => {
+        if (!readReset()) router.replace("/login");
+    }, [router]);
 
     async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
         e.preventDefault();
@@ -50,31 +58,33 @@ export default function ResetPasswordForm() {
             return;
         }
 
+        const reset = readReset();
+        if (!reset) {
+            router.replace("/login");
+            return;
+        }
+
         setIsLoading(true);
         try {
-            const res = await fetch("/api/auth/reset-password", {
+            await api("/auth/reset-password", {
                 method: "POST",
-                headers: { "content-type": "application/json" },
-                // Only the new password is sent. The confirm field stays in the browser.
-                body: JSON.stringify({ newPassword }),
+                auth: false,
+                body: {
+                    email: reset.email,
+                    resetToken: reset.resetToken,
+                    newPassword,
+                },
             });
-            const data = (await res.json()) as { message?: string };
-
-            if (!res.ok) {
-                // A 401 means the reset session is gone. The message says so, and the
-                // "Back to sign in" link below lets the user start over.
-                setError(
-                    data.message ?? "We couldn't update your password. Please try again.",
-                );
-                return;
-            }
-
-            // Don't keep passwords in memory longer than needed.
+            clearReset();
             setNewPassword("");
             setConfirmPassword("");
             setDone(true);
-        } catch {
-            setError("We couldn't update your password. Please try again.");
+        } catch (error) {
+            setError(
+                error instanceof ApiError
+                    ? error.message
+                    : "We couldn't update your password. Please try again.",
+            );
         } finally {
             setIsLoading(false);
         }

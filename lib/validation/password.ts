@@ -1,17 +1,9 @@
-/**
- * Confirmed password policy:
- * - At least 8 characters
- * - At least one letter
- * - At least one digit
- */
-export const PASSWORD_HINT = "At least 8 characters, with a letter and a number.";
+/** Matches SL-backend password policy. The API is what enforces it. */
+export const PASSWORD_HINT =
+    "At least 8 characters, with an uppercase letter, a lowercase letter, and a number.";
 
 export function passwordProblem(password: string): string {
-    if (
-        password.length < 8 ||
-        !/[A-Za-z]/.test(password) ||
-        !/\d/.test(password)
-    ) {
+    if (password.length > 72 || !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(password)) {
         return PASSWORD_HINT;
     }
     return "";

@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import Link from "next/link";
 import PasswordInput from "@/components/(auth)/PasswordInput";
 import OtpInput from "@/components/(auth)/OtpInput";
 import {
@@ -18,9 +17,10 @@ import {
     mapBackendFieldErrors,
     type LoginFieldErrors,
 } from "@/lib/validation/auth";
-import { setClientSession } from "@/lib/auth/authClient";
+import { useAuth } from "@/lib/auth/AuthContext";
+import { saveReset } from "@/lib/auth/session";
 import { getRoleHome, isRouteAllowedForRole } from "@/lib/auth/roles";
-import type { BackendTokens, BackendUser, ApiFieldError } from "@/lib/api/types";
+import { api, ApiError } from "@/lib/api/client";
 
 type View = "signin" | "reset" | "otp";
 
@@ -74,12 +74,11 @@ function Spinner() {
 interface ApiErrorState {
     message: string;
     code?: string;
-    isRegistrationIncomplete?: boolean;
-    isAccountDisabled?: boolean;
 }
 
 function LoginContent() {
     const router = useRouter();
+    const { signIn } = useAuth();
     const searchParams = useSearchParams();
     const [view, setView] = useState<View>("signin");
     const [email, setEmail] = useState("");
@@ -96,11 +95,6 @@ function LoginContent() {
     const emailInputRef = useRef<HTMLInputElement>(null);
     const passwordInputRef = useRef<HTMLInputElement>(null);
 
-    const registeredParam = searchParams.get("registered");
-    const isPendingApproval = registeredParam === "pending";
-    const isRegistered = registeredParam === "true";
-
-    // Query messages from Ticket 1 and Ticket 2
     const queryMessage = searchParams.get("message");
     const queryError = searchParams.get("error");
     const returnUrl = searchParams.get("returnUrl");
@@ -164,94 +158,37 @@ function LoginContent() {
         setIsLoading(true);
 
         try {
-            const res = await fetch("/api/auth/login", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    email: validation.sanitized.email,
-                    password: validation.sanitized.password,
-                    remember,
-                }),
-            });
-
-            const data = (await res.json()) as {
-                message?: string;
-                code?: string;
-                errors?: ApiFieldError[];
-                user?: BackendUser;
-                tokens?: BackendTokens;
-            };
-
-            if (!res.ok) {
-                // Map API field errors if present
-                if (Array.isArray(data.errors) && data.errors.length > 0) {
-                    setFieldErrors(mapBackendFieldErrors(data.errors));
-                }
-
-                // Ticket 3 API error handling
-                if (res.status === 401 || data.code === "INVALID_CREDENTIALS") {
-                    // Show API message without highlighting a specific field
-                    setApiError({
-                        message: data.message || "Invalid email or password",
-                        code: data.code || "INVALID_CREDENTIALS",
-                    });
-                } else if (res.status === 403 && data.code === "REGISTRATION_INCOMPLETE") {
-                    setApiError({
-                        message: data.message || "Registration incomplete.",
-                        code: data.code,
-                        isRegistrationIncomplete: true,
-                    });
-                } else if (res.status === 403 && data.code === "ACCOUNT_DISABLED") {
-                    setApiError({
-                        message: data.message || "Your account has been disabled. Please contact support.",
-                        code: data.code,
-                        isAccountDisabled: true,
-                    });
-                } else if (res.status === 403 && data.code === "FORBIDDEN_ROLE") {
-                    setApiError({
-                        message: "This portal is for staff",
-                        code: data.code,
-                    });
-                } else if (res.status === 429) {
-                    setApiError({
-                        message: "Too many attempts. Please try again later.",
-                        code: "RATE_LIMITED",
-                    });
-                } else {
-                    setApiError({
-                        message: data.message || "Something went wrong. Please try again.",
-                        code: data.code,
-                    });
-                }
-                return;
-            }
-
-            // Success: configure client session
-            if (data.tokens && data.user) {
-                try {
-                    setClientSession(data.tokens, data.user);
-                } catch {
-                    setApiError({ message: "This portal is for staff" });
-                    return;
-                }
-
-                // Ticket 2: Role redirect / returnUrl check
-                const userRole = data.user.role;
-                if (
-                    returnUrl &&
-                    returnUrl.startsWith("/") &&
-                    !returnUrl.startsWith("//") &&
-                    isRouteAllowedForRole(returnUrl, userRole)
-                ) {
-                    router.replace(returnUrl);
-                } else {
-                    router.replace(getRoleHome(userRole));
-                }
+            const user = await signIn(
+                validation.sanitized.email,
+                validation.sanitized.password,
+                remember,
+            );
+            const userRole = user.role;
+            if (
+                returnUrl &&
+                returnUrl.startsWith("/") &&
+                !returnUrl.startsWith("//") &&
+                isRouteAllowedForRole(returnUrl, userRole)
+            ) {
+                router.replace(returnUrl);
             } else {
-                router.replace("/console");
+                router.replace(getRoleHome(userRole));
             }
-        } catch {
-            setApiError({ message: "Network error: backend service unavailable." });
+        } catch (error) {
+            if (error instanceof ApiError) {
+                if (Array.isArray(error.errors) && error.errors.length > 0) {
+                    setFieldErrors(mapBackendFieldErrors(error.errors));
+                }
+                setApiError({
+                    message:
+                        error.code === "FORBIDDEN_ROLE"
+                            ? "This portal is for staff"
+                            : error.message || "Something went wrong. Please try again.",
+                    code: error.code,
+                });
+            } else {
+                setApiError({ message: "Network error: backend service unavailable." });
+            }
         } finally {
             setIsLoading(false);
         }
@@ -261,20 +198,16 @@ function LoginContent() {
         setApiError(null);
         setIsLoading(true);
         try {
-            const res = await fetch("/api/auth/forgot-password", {
+            await api("/auth/forgot-password", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: email.trim().toLowerCase() }),
+                auth: false,
+                body: { email: email.trim().toLowerCase() },
             });
-            const data = (await res.json()) as { message?: string };
-            if (!res.ok) {
-                setApiError({ message: data.message ?? "We couldn't send the code. Please try again." });
-                return false;
-            }
             setIsOtpLockedOut(false);
             return true;
-        } catch {
-            setApiError({ message: "We couldn't send the code. Please try again." });
+        } catch (error) {
+            const message = error instanceof ApiError ? error.message : "We couldn't send the code. Please try again.";
+            setApiError({ message });
             return false;
         } finally {
             setIsLoading(false);
@@ -302,23 +235,25 @@ function LoginContent() {
         setApiError(null);
         setIsLoading(true);
         try {
-            const res = await fetch("/api/auth/verify-otp", {
+            const normalizedEmail = email.trim().toLowerCase();
+            const data = await api<{ resetToken: string }>("/auth/verify-otp", {
                 method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ email: email.trim().toLowerCase(), otp: otp.trim() }),
+                auth: false,
+                body: { email: normalizedEmail, otp: otp.trim() },
             });
-            const data = (await res.json()) as { message?: string; remainingAttempts?: number };
-            if (!res.ok) {
-                setApiError({ message: data.message ?? "That code didn't work. Please try again." });
-                if (res.status === 429 || data.remainingAttempts === 0) {
-                    setIsOtpLockedOut(true);
-                    setOtp("");
-                }
+            if (!data?.resetToken) {
+                setApiError({ message: "We couldn't verify the code. Please try again." });
                 return;
             }
+            saveReset({ email: normalizedEmail, resetToken: data.resetToken });
             router.replace("/reset-password");
-        } catch {
-            setApiError({ message: "We couldn't verify the code. Please try again." });
+        } catch (error) {
+            const message = error instanceof ApiError ? error.message : "We couldn't verify the code. Please try again.";
+            setApiError({ message });
+            if (error instanceof ApiError && (error.status === 429 || error.code === "OTP_LOCKED")) {
+                setIsOtpLockedOut(true);
+                setOtp("");
+            }
         } finally {
             setIsLoading(false);
         }
@@ -400,7 +335,7 @@ function LoginContent() {
             )}
 
             {/* Member Refusal notification from Ticket 2 */}
-            {queryError === "member_refused" && !apiError && view === "signin" && (
+            {(queryError === "staff_only" || queryError === "member_refused") && !apiError && view === "signin" && (
                 <div
                     role="alert"
                     className="mb-5 rounded-[6px] border border-[#F2C4C0] bg-[#FDF2F1] px-3.5 py-2.5 text-[13px] text-[#B42318]"
@@ -409,42 +344,12 @@ function LoginContent() {
                 </div>
             )}
 
-            {isPendingApproval && view === "signin" && !apiError && !queryMessage && (
-                <div
-                    role="status"
-                    className="mb-5 rounded-[6px] border border-[#BDEBA0] bg-[#F4FBEA] px-3 py-2.5 text-[13px] text-[#2F6114]"
-                >
-                    <span className="font-semibold block mb-0.5">Registration submitted</span>
-                    Your coach account has been registered and is pending administrator activation. You will be able to sign in once an administrator approves your account.
-                </div>
-            )}
-
-            {isRegistered && !isPendingApproval && view === "signin" && !apiError && !queryMessage && (
-                <div
-                    role="status"
-                    className="mb-5 rounded-[6px] border border-[#BDEBA0] bg-[#F4FBEA] px-3 py-2 text-[13px] text-[#2F6114]"
-                >
-                    Account created successfully. Please sign in below.
-                </div>
-            )}
-
-            {/* API Errors Banner */}
             {apiError && (
                 <div
                     role="alert"
                     className="mb-5 rounded-[6px] border border-[#F2C4C0] bg-[#FDF2F1] px-3.5 py-2.5 text-[13px] text-[#B42318]"
                 >
-                    <span>{apiError.message}</span>
-                    {apiError.isRegistrationIncomplete && (
-                        <div className="mt-1">
-                            <Link
-                                href="/signup"
-                                className="font-semibold underline underline-offset-2 hover:opacity-90 inline-block min-h-[44px] leading-[44px]"
-                            >
-                                Finish sign-up &rarr;
-                            </Link>
-                        </div>
-                    )}
+                    {apiError.message}
                 </div>
             )}
 
@@ -563,16 +468,6 @@ function LoginContent() {
                             )}
                         </button>
                     </form>
-
-                    <div className="mt-5 text-center text-[13px] text-muted">
-                        Don&apos;t have an account?{" "}
-                        <Link
-                            href="/signup"
-                            className={`${linkButtonClass} inline-flex min-h-[44px] items-center`}
-                        >
-                            Sign up
-                        </Link>
-                    </div>
                 </>
             )}
 
